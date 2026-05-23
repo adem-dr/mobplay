@@ -250,5 +250,5 @@ This project is licensed under the MIT License.
 ---
 
 <p align="center">
-  Made with ❤️ by <b>Adem Deroues</b> & <b>Abderrahmane Elkedim</b>
+  Made  by <b>Adem Deroues</b> & <b>Abderrahmane Elkedim</b>
 </p>
