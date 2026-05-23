@@ -1,0 +1,282 @@
+import 'dart:convert';
+import 'package:flutter/foundation.dart';
+import 'package:http/http.dart' as http;
+
+// ── Ayah model ───────────────────────────────────────────────────────────────
+class Ayah {
+  final int number;
+  final int numberInSurah;
+  final String text;
+  final bool isIntro;
+
+  const Ayah({
+    required this.number,
+    required this.numberInSurah,
+    required this.text,
+    this.isIntro = false,
+  });
+
+  factory Ayah.fromJson(Map<String, dynamic> json) {
+    return Ayah(
+      number: json['number'] ?? 0,
+      numberInSurah: json['numberInSurah'] ?? 0,
+      text: (json['text'] ?? '').toString().trim(),
+    );
+  }
+}
+
+// ── Timed word ──────────────────────────────────────────────────────────────
+class TimedWord {
+  final String word;
+  final Duration startTime;
+  final Duration endTime;
+
+  const TimedWord({
+    required this.word,
+    required this.startTime,
+    required this.endTime,
+  });
+}
+
+// ── Timed ayah ──────────────────────────────────────────────────────────────
+class TimedAyah {
+  final Ayah ayah;
+  final Duration startTime;
+  final Duration endTime;
+  final List<TimedWord> words;
+
+  const TimedAyah({
+    required this.ayah,
+    required this.startTime,
+    required this.endTime,
+    required this.words,
+  });
+
+  int getActiveWordIndex(Duration position) {
+    // Add a slight 250ms lead so words highlight slightly faster/ahead of the audio
+    final adjustedPos = position + const Duration(milliseconds: 250);
+
+    for (int i = 0; i < words.length; i++) {
+      if (adjustedPos >= words[i].startTime && adjustedPos < words[i].endTime) {
+        return i;
+      }
+    }
+    if (adjustedPos >= endTime && words.isNotEmpty) return words.length - 1;
+    return 0;
+  }
+}
+
+// ── Service ─────────────────────────────────────────────────────────────────
+class LyricsService {
+  static final Map<String, List<Ayah>> _cache = {};
+  static final Map<String, List<double>> _durCache = {};
+
+  static const Duration _interAyahGap = Duration(milliseconds: 400);
+
+  // ── Word Weight & Clean Helpers ──────────────────────────────────────────
+  static String _cleanArabic(String text) {
+    return text
+        .replaceAll(RegExp(r'[\u064B-\u065F\u0670\u06D6-\u06ED]'), '')
+        .replaceAll('ٱ', 'ا')
+        .replaceAll('أ', 'ا')
+        .replaceAll('إ', 'ا')
+        .replaceAll('آ', 'ا')
+        .replaceAll('ی', 'ي')
+        .replaceAll('ـ', '')
+        .trim();
+  }
+
+  static double _getWordWeight(String rawWord) {
+    final clean = _cleanArabic(rawWord);
+    
+    // Only boost الٓمٓ / الم so it takes a lot of time, all other words are standard
+    if (clean == 'الم') {
+      return 15.0;
+    }
+
+    return 1.0; // Standard word weight
+  }
+
+  // ── Fetch ayah text ───────────────────────────────────────────────────────
+  static Future<List<Ayah>> fetchAyahs(String surahNumber) async {
+    if (_cache.containsKey(surahNumber)) return _cache[surahNumber]!;
+
+    try {
+      final url = Uri.parse('https://api.alquran.cloud/v1/surah/$surahNumber');
+      final response = await http.get(url);
+
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body);
+        final List ayahsJson = data['data']['ayahs'] ?? [];
+        final apiAyahs = ayahsJson.map((a) => Ayah.fromJson(a)).toList();
+
+        _cache[surahNumber] = apiAyahs;
+        return apiAyahs;
+      }
+    } catch (e) {
+      debugPrint('Lyrics fetch error: $e');
+    }
+    return [];
+  }
+
+  static Future<List<double>> fetchAyahWeights(String surahNumber) async {
+    if (_durCache.containsKey(surahNumber)) return _durCache[surahNumber]!;
+
+    try {
+      final url = Uri.parse(
+          'https://api.alquran.cloud/v1/surah/$surahNumber/ar.alafasy');
+      final resp = await http.get(url);
+      if (resp.statusCode != 200) return [];
+
+      final data = json.decode(resp.body);
+      final List ayahs = data['data']['ayahs'] ?? [];
+
+      // Fetch audio sizes in chunks of 15 to avoid choking the network stack
+      const int maxConcurrency = 15;
+      final List<double> weights = List.filled(ayahs.length, 1.0);
+
+      for (int i = 0; i < ayahs.length; i += maxConcurrency) {
+        final chunkEnd = (i + maxConcurrency < ayahs.length)
+            ? i + maxConcurrency
+            : ayahs.length;
+
+        final List<Future<void>> chunkFutures = [];
+
+        for (int j = i; j < chunkEnd; j++) {
+          final index = j;
+          final audioUrl = ayahs[index]['audio'] as String?;
+          if (audioUrl != null) {
+            chunkFutures.add(() async {
+              try {
+                final head = await http.head(Uri.parse(audioUrl))
+                    .timeout(const Duration(seconds: 3));
+                final size =
+                    int.tryParse(head.headers['content-length'] ?? '') ?? 0;
+                weights[index] = size > 0 ? size / 16000.0 : 1.0;
+              } catch (_) {
+                weights[index] = 1.0;
+              }
+            }());
+          }
+        }
+        await Future.wait(chunkFutures);
+      }
+
+      _durCache[surahNumber] = weights;
+      return weights;
+    } catch (e) {
+      debugPrint('Ayah weights fetch error: $e');
+    }
+    return [];
+  }
+
+  // ── Create timed ayahs ────────────────────────────────────────────────────
+  static List<TimedAyah> createTimedAyahs(
+    List<Ayah> ayahs,
+    Duration totalDuration, {
+    List<double> audioWeights = const [],
+  }) {
+    if (ayahs.isEmpty || totalDuration.inMilliseconds <= 0) return [];
+
+    final gapCount = ayahs.length - 1;
+    final totalGapMs = gapCount * _interAyahGap.inMilliseconds;
+
+    final availableMs = totalDuration.inMilliseconds - totalGapMs;
+    if (availableMs <= 0) {
+      return _fallbackEvenSplit(ayahs, totalDuration);
+    }
+
+    // Choose weights: audio-based (accurate) or word-count (fallback)
+    List<double> weights;
+    if (audioWeights.isNotEmpty && audioWeights.length == ayahs.length) {
+      weights = audioWeights;
+    } else {
+      weights = ayahs
+          .map((a) => _splitWords(a.text)
+              .fold<double>(0.0, (sum, w) => sum + _getWordWeight(w)))
+          .toList();
+    }
+
+    final totalWeight = weights.fold<double>(0, (sum, w) => sum + w);
+    if (totalWeight == 0) return [];
+
+    final List<TimedAyah> timed = [];
+    Duration cursor = Duration.zero;
+
+    for (int i = 0; i < ayahs.length; i++) {
+      final proportion = weights[i] / totalWeight;
+      final ayahMs = (availableMs * proportion).round();
+
+      final ayahStart = cursor;
+      final ayahEnd = i == ayahs.length - 1
+          ? totalDuration
+          : cursor + Duration(milliseconds: ayahMs);
+
+      final words = _splitWords(ayahs[i].text);
+      timed.add(TimedAyah(
+        ayah: ayahs[i],
+        startTime: ayahStart,
+        endTime: ayahEnd,
+        words: _distributeWords(words, ayahStart, ayahEnd),
+      ));
+
+      cursor = ayahEnd;
+      if (i < ayahs.length - 1) {
+        cursor = cursor + _interAyahGap;
+      }
+    }
+    return timed;
+  }
+
+  // ── Fallback even split ───────────────────────────────────────────────────
+  static List<TimedAyah> _fallbackEvenSplit(
+      List<Ayah> ayahs, Duration total) {
+    final perAyah =
+        Duration(milliseconds: total.inMilliseconds ~/ ayahs.length);
+    final List<TimedAyah> timed = [];
+    Duration cursor = Duration.zero;
+    for (int i = 0; i < ayahs.length; i++) {
+      final end =
+          i == ayahs.length - 1 ? total : cursor + perAyah;
+      timed.add(TimedAyah(
+        ayah: ayahs[i],
+        startTime: cursor,
+        endTime: end,
+        words: _distributeWords(_splitWords(ayahs[i].text), cursor, end),
+      ));
+      cursor = end;
+    }
+    return timed;
+  }
+
+  // ── Helpers ────────────────────────────────────────────────────────────────
+  static List<String> _splitWords(String text) =>
+      text.split(RegExp(r'\s+')).where((w) => w.isNotEmpty).toList();
+
+  static List<TimedWord> _distributeWords(
+      List<String> words, Duration start, Duration end) {
+    if (words.isEmpty) return [];
+
+    // Calculate custom weights for each word
+    final List<double> wordWeights = words.map((w) {
+      return w.length * _getWordWeight(w);
+    }).toList();
+
+    final totalWeight = wordWeights.fold<double>(0.0, (sum, w) => sum + w);
+    if (totalWeight == 0) return [];
+
+    final totalMs = end.inMilliseconds - start.inMilliseconds;
+    final List<TimedWord> result = [];
+    Duration wCursor = start;
+
+    for (int i = 0; i < words.length; i++) {
+      final proportion = wordWeights[i] / totalWeight;
+      final wEnd = i == words.length - 1
+          ? end
+          : wCursor + Duration(milliseconds: (totalMs * proportion).round());
+      result.add(TimedWord(word: words[i], startTime: wCursor, endTime: wEnd));
+      wCursor = wEnd;
+    }
+    return result;
+  }
+}

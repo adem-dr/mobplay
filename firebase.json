@@ -1,0 +1,39 @@
+{
+  "flutter": {
+    "platforms": {
+      "android": {
+        "default": {
+          "projectId": "mobplay-app",
+          "appId": "1:520548367958:android:e25767b15a93ecdd6c85f7",
+          "fileOutput": "android/app/google-services.json"
+        }
+      },
+      "dart": {
+        "lib/firebase_options.dart": {
+          "projectId": "mobplay-app",
+          "configurations": {
+            "android": "1:520548367958:android:e25767b15a93ecdd6c85f7",
+            "ios": "1:520548367958:ios:a9f65228fe917e0f6c85f7",
+            "macos": "1:520548367958:ios:a9f65228fe917e0f6c85f7",
+            "web": "1:520548367958:web:23da18bddab42a7a6c85f7",
+            "windows": "1:520548367958:web:0dd449fadf3d5ebe6c85f7"
+          }
+        }
+      }
+    }
+  },
+  "auth": {
+    "providers": {
+      "emailPassword": true
+    }
+  },
+  "firestore": {
+    "database": "(default)",
+    "location": "nam5",
+    "rules": "firestore.rules",
+    "indexes": "firestore.indexes.json"
+  },
+  "storage": {
+    "rules": "storage.rules"
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "520548367958",
+    "project_id": "mobplay-app",
+    "storage_bucket": "mobplay-app.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:520548367958:android:e25767b15a93ecdd6c85f7",
+        "android_client_info": {
+          "package_name": "com.example.mobplay"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDJZf1aoyb3q3IvBvMAZLgHsK94g0Kqefs"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
